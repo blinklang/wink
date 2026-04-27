@@ -1,0 +1,9 @@
+[package]
+name = "wink"
+version = "0.1.0"
+blink-version = "0.40.0"
+
+[dependencies]
+
+[native-dependencies]
+c = { system = true }

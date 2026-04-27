@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(br --help)",
+      "Bash(blink --help)",
+      "Bash(blink llms *)",
+      "Bash(br ls *)",
+      "WebFetch(domain:ratatui.rs)",
+      "Bash(blink doc *)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:jdhao.github.io)",
+      "Bash(br add *)",
+      "Bash(br dep *)",
+      "Bash(br graph *)"
+    ]
+  }
+}

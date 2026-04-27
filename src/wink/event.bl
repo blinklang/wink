@@ -1,0 +1,32 @@
+pub type Key {
+    Up
+    Down
+    Left
+    Right
+    Enter
+    Escape
+    Backspace
+    Tab
+    Char(ch: Char)
+    Ctrl(ch: Char)
+}
+
+pub type Event {
+    Key(key: Key)
+    Resize(cols: Int, rows: Int)
+    Quit
+}
+
+test "Event variants construct" {
+    let _quit = Event.Quit
+    let _resize = Event.Resize(cols: 80, rows: 24)
+    let _key = Event.Key(key: Key.Up)
+}
+
+test "Key.Char and Key.Ctrl carry a Char" {
+    let key = Key.Char(ch: 'q')
+    match key {
+        Char(ch) => assert_eq(ch.to_int(), 'q'.to_int())
+        _ => assert(false, "expected Key.Char")
+    }
+}
