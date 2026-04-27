@@ -1,0 +1,302 @@
+import wink.event.{Event, Key}
+
+fn byte_at(buf: Bytes, i: Int) -> Int {
+    match buf.get(i) {
+        Some(b) => b
+        None => -1
+    }
+}
+
+fn arrow_for(byte: Int) -> Option[Key] {
+    if byte == 65 {
+        Some(Key.Up)
+    } else if byte == 66 {
+        Some(Key.Down)
+    } else if byte == 67 {
+        Some(Key.Right)
+    } else if byte == 68 {
+        Some(Key.Left)
+    } else {
+        None
+    }
+}
+
+fn ctrl_key(byte: Int) -> Key {
+    let ch = match Char.from_code_point(byte + 96) {
+        Ok(c) => c
+        Err(_) => 'a'
+    }
+    Key.Ctrl(ch: ch)
+}
+
+fn printable_key(byte: Int) -> Key {
+    let ch = match Char.from_code_point(byte) {
+        Ok(c) => c
+        Err(_) => '?'
+    }
+    Key.Char(ch: ch)
+}
+
+pub fn parse(chunk: Bytes, carry: Bytes) -> (List[Event], Bytes) {
+    let buf = carry.concat(chunk)
+    let len = buf.len()
+    let mut events: List[Event] = []
+    let mut i = 0
+
+    // ESC=27 LF=10 CR=13 TAB=9 DEL=127, '['=91, 'O'=79
+    while i < len {
+        let b = byte_at(buf, i)
+
+        if b == 27 {
+            if i + 1 >= len {
+                return (events, buf.slice(i, len))
+            }
+            let b1 = byte_at(buf, i + 1)
+            if b1 == 91 || b1 == 79 {
+                if i + 2 >= len {
+                    return (events, buf.slice(i, len))
+                }
+                let b2 = byte_at(buf, i + 2)
+                match arrow_for(b2) {
+                    Some(k) => events.push(Event.Key(key: k))
+                    None => {}
+                }
+                i = i + 3
+            } else {
+                i = i + 1
+            }
+        } else if b == 13 {
+            events.push(Event.Key(key: Key.Enter))
+            i = i + 1
+        } else if b == 9 {
+            events.push(Event.Key(key: Key.Tab))
+            i = i + 1
+        } else if b == 127 {
+            events.push(Event.Key(key: Key.Backspace))
+            i = i + 1
+        } else if b == 10 {
+            i = i + 1
+        } else if b >= 1 && b <= 26 {
+            events.push(Event.Key(key: ctrl_key(b)))
+            i = i + 1
+        } else if b >= 32 && b <= 126 {
+            events.push(Event.Key(key: printable_key(b)))
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+
+    (events, Bytes.new())
+}
+
+// --- test helpers ---
+
+fn bytes_of(codes: List[Int]) -> Bytes {
+    let mut b = Bytes.new()
+    for c in codes {
+        b.push(c)
+    }
+    b
+}
+
+// key tags: Up=0 Down=1 Left=2 Right=3 Enter=4 Escape=5 Backspace=6 Tab=7 Char=8 Ctrl=9
+fn key_tag(k: Key) -> Int {
+    match k {
+        Up => 0
+        Down => 1
+        Left => 2
+        Right => 3
+        Enter => 4
+        Escape => 5
+        Backspace => 6
+        Tab => 7
+        Char(_) => 8
+        Ctrl(_) => 9
+    }
+}
+
+fn char_payload(k: Key) -> Int {
+    let mut out: Int = -1
+    match k {
+        Char(ch) => { out = ch.to_int() }
+        _ => {}
+    }
+    out
+}
+
+fn ctrl_payload(k: Key) -> Int {
+    let mut out: Int = -1
+    match k {
+        Ctrl(ch) => { out = ch.to_int() }
+        _ => {}
+    }
+    out
+}
+
+fn key_at_idx(events: List[Event], idx: Int) -> Key {
+    let e = events.get(idx).unwrap()
+    let mut out: Key = Key.Char(ch: '?')
+    match e {
+        Event.Key(k) => { out = k }
+        _ => {}
+    }
+    out
+}
+
+fn assert_char_key(events: List[Event], idx: Int, expected: Char) {
+    let k: Key = key_at_idx(events, idx)
+    assert_eq(key_tag(k), 8)
+    assert_eq(char_payload(k), expected.to_int())
+}
+
+fn assert_ctrl_key(events: List[Event], idx: Int, expected: Char) {
+    let k: Key = key_at_idx(events, idx)
+    assert_eq(key_tag(k), 9)
+    assert_eq(ctrl_payload(k), expected.to_int())
+}
+
+fn assert_arrow_up(events: List[Event], idx: Int) {
+    assert_eq(key_tag(key_at_idx(events, idx)), 0)
+}
+
+fn assert_arrow_down(events: List[Event], idx: Int) {
+    assert_eq(key_tag(key_at_idx(events, idx)), 1)
+}
+
+fn assert_arrow_left(events: List[Event], idx: Int) {
+    assert_eq(key_tag(key_at_idx(events, idx)), 2)
+}
+
+fn assert_arrow_right(events: List[Event], idx: Int) {
+    assert_eq(key_tag(key_at_idx(events, idx)), 3)
+}
+
+fn assert_enter(events: List[Event], idx: Int) {
+    assert_eq(key_tag(key_at_idx(events, idx)), 4)
+}
+
+fn assert_backspace(events: List[Event], idx: Int) {
+    assert_eq(key_tag(key_at_idx(events, idx)), 6)
+}
+
+fn assert_tab(events: List[Event], idx: Int) {
+    assert_eq(key_tag(key_at_idx(events, idx)), 7)
+}
+
+test "printable q produces Key.Char" {
+    let result = parse(bytes_of([113]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_eq(carry.len(), 0)
+    assert_char_key(events, 0, 'q')
+}
+
+test "Ctrl+C produces Key.Ctrl c" {
+    let result = parse(bytes_of([3]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_eq(carry.len(), 0)
+    assert_ctrl_key(events, 0, 'c')
+}
+
+test "ESC bracket A is Key.Up" {
+    let result = parse(bytes_of([27, 91, 65]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_eq(carry.len(), 0)
+    assert_arrow_up(events, 0)
+}
+
+test "ESC bracket B is Key.Down" {
+    let result = parse(bytes_of([27, 91, 66]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_arrow_down(events, 0)
+}
+
+test "ESC bracket C is Key.Right" {
+    let result = parse(bytes_of([27, 91, 67]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_arrow_right(events, 0)
+}
+
+test "ESC bracket D is Key.Left" {
+    let result = parse(bytes_of([27, 91, 68]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_arrow_left(events, 0)
+}
+
+test "ESC O A is Key.Up" {
+    let result = parse(bytes_of([27, 79, 65]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_eq(carry.len(), 0)
+    assert_arrow_up(events, 0)
+}
+
+test "Enter is 0x0d" {
+    let result = parse(bytes_of([13]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_enter(events, 0)
+}
+
+test "Backspace is 0x7f" {
+    let result = parse(bytes_of([127]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_backspace(events, 0)
+}
+
+test "Tab is 0x09" {
+    let result = parse(bytes_of([9]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 1)
+    assert_tab(events, 0)
+}
+
+test "split escape across chunks" {
+    let r1 = parse(bytes_of([27]), Bytes.new())
+    let (events1, carry1) = r1
+    assert_eq(events1.len(), 0)
+    assert_eq(carry1.len(), 1)
+    let r2 = parse(bytes_of([91, 65]), carry1)
+    let (events2, carry2) = r2
+    assert_eq(events2.len(), 1)
+    assert_eq(carry2.len(), 0)
+    assert_arrow_up(events2, 0)
+}
+
+test "ESC bracket A then q in one chunk" {
+    let result = parse(bytes_of([27, 91, 65, 113]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 2)
+    assert_eq(carry.len(), 0)
+    assert_arrow_up(events, 0)
+    assert_char_key(events, 1, 'q')
+}
+
+test "bare ESC stays in carry" {
+    let result = parse(bytes_of([27]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 0)
+    assert_eq(carry.len(), 1)
+    assert_eq(byte_at(carry, 0), 27)
+}
+
+test "ESC bracket alone stays in carry" {
+    let result = parse(bytes_of([27, 91]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 0)
+    assert_eq(carry.len(), 2)
+}
+
+test "unknown ESC bracket Z drops silently" {
+    let result = parse(bytes_of([27, 91, 90]), Bytes.new())
+    let (events, carry) = result
+    assert_eq(events.len(), 0)
+    assert_eq(carry.len(), 0)
+}

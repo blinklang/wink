@@ -1,0 +1,144 @@
+// Raw mode terminal control for wink.
+//
+// Linux/glibc x86_64 only. Uses cfmakeraw(3) for the lflag/iflag/cflag
+// transformation rather than masking ICANON|ECHO by hand, because Blink's
+// Ptr[U8] surface has no offset arithmetic available in user code (no
+// `.add(off)`, no slicing) — so writing 4 bytes at offset 12 of a malloc'd
+// termios buffer is not feasible without a C-side helper.
+//
+// Trade-off vs the original plan: cfmakeraw also clears ISIG, so Ctrl-C will
+// be delivered as a 0x03 byte instead of generating SIGINT. Apps using this
+// must surface that key explicitly.
+//
+// MANUAL SMOKE TEST (no automated coverage — would mangle test runner TTY):
+//   blink run a small program that does
+//     `with enter_raw() as _r { time.sleep(Duration.seconds(2)) }`
+//   confirm the terminal:
+//     - hides the cursor + switches to alt screen on entry
+//     - restores cursor + cooked mode + main screen on exit (or Ctrl-C
+//       at the SHELL after the program is gone — *not* during raw mode)
+
+import std.traits
+
+// ---- FFI bindings ---------------------------------------------------------
+
+@trusted
+@ffi("c", "tcgetattr")
+fn c_tcgetattr(fd: I32, termios_p: Ptr[U8]) -> I32 ! FFI
+
+@trusted
+@ffi("c", "tcsetattr")
+fn c_tcsetattr(fd: I32, optional_actions: I32, termios_p: Ptr[U8]) -> I32 ! FFI
+
+@trusted
+@ffi("c", "cfmakeraw")
+fn c_cfmakeraw(termios_p: Ptr[U8]) ! FFI
+
+@trusted
+@ffi("c", "write")
+fn c_write(fd: I32, buf: Ptr[U8], count: U64) -> I64 ! FFI
+
+@trusted
+@ffi("c", "isatty")
+fn c_isatty(fd: I32) -> I32 ! FFI
+
+@trusted
+@ffi("c", "malloc")
+fn c_malloc(n: U64) -> Ptr[U8] ! FFI
+
+@trusted
+@ffi("c", "free")
+fn c_free(p: Ptr[U8]) ! FFI
+
+// ---- Public type ----------------------------------------------------------
+
+pub type RawMode {
+    saved_termios: Ptr[U8]
+    fd: I32
+}
+
+// ---- Internal helpers -----------------------------------------------------
+
+fn esc() -> Str {
+    str_from_code_point(27)
+}
+
+fn enter_seq() -> Str {
+    esc() + "[?1049h" + esc() + "[?25l"
+}
+
+fn leave_seq() -> Str {
+    esc() + "[?25h" + esc() + "[?1049l"
+}
+
+// ---- Public API -----------------------------------------------------------
+
+pub fn write_all(fd: I32, s: Str) ! FFI {
+    let mut scope = ffi_scope()
+    let p = scope.cstr(s)
+    let n = Bytes.from_str(s).len().to_u64()
+    c_write(fd, p, n)
+}
+
+pub fn enter_raw() -> RawMode ! FFI, IO {
+    let saved = c_malloc(60.to_u64())
+    let working = c_malloc(60.to_u64())
+    let _r1 = c_tcgetattr(0.to_i32(), saved)
+    let _r2 = c_tcgetattr(0.to_i32(), working)
+    c_cfmakeraw(working)
+    let _r3 = c_tcsetattr(0.to_i32(), 0.to_i32(), working)
+    c_free(working)
+    write_all(1.to_i32(), enter_seq())
+    RawMode { saved_termios: saved, fd: 0.to_i32() }
+}
+
+impl Closeable for RawMode {
+    fn close(self) {
+        // Inline write of leave sequence (effects are *not* propagated through
+        // trait method bodies, so we cannot call write_all here — call FFI
+        // primitives directly, mirroring stdlib's `impl Closeable for Stmt`).
+        let s = leave_seq()
+        let mut scope = ffi_scope()
+        let p = scope.cstr(s)
+        let n = Bytes.from_str(s).len().to_u64()
+        c_write(1.to_i32(), p, n)
+        let _r = c_tcsetattr(self.fd, 0.to_i32(), self.saved_termios)
+        c_free(self.saved_termios)
+    }
+}
+
+// ---- Tests ----------------------------------------------------------------
+
+test "isatty returns 0 on bogus fd 99" {
+    assert_eq(c_isatty(99.to_i32()).to_int(), 0)
+}
+
+test "tcgetattr smoke on stdin if a TTY" {
+    if c_isatty(0.to_i32()).to_int() == 1 {
+        let buf = c_malloc(60.to_u64())
+        let rc = c_tcgetattr(0.to_i32(), buf)
+        assert_eq(rc.to_int(), 0)
+        c_free(buf)
+    }
+    // else: not a TTY (CI / pipe). Skip silently — do not fail.
+}
+
+test "enter_seq and leave_seq begin with ESC and contain alt-screen toggles" {
+    let e = enter_seq()
+    let l = leave_seq()
+    let eb = Bytes.from_str(e)
+    let lb = Bytes.from_str(l)
+    // First byte must be ESC (0x1b = 27)
+    match eb.get(0) {
+        Some(b) => assert_eq(b, 27)
+        None => assert(false, "enter_seq empty")
+    }
+    match lb.get(0) {
+        Some(b) => assert_eq(b, 27)
+        None => assert(false, "leave_seq empty")
+    }
+    // enter contains "?1049h" (alt-screen on)
+    assert(e.contains("?1049h"), "enter missing 1049h")
+    // leave contains "?1049l" (alt-screen off)
+    assert(l.contains("?1049l"), "leave missing 1049l")
+}
