@@ -7,3 +7,4 @@ blink-version = "0.40.0"
 
 [native-dependencies]
 c = { system = true }
+signal_shim = { path = "vendor/signal_shim.c" }

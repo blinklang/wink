@@ -1,0 +1,129 @@
+// Self-pipe signal multiplexing for wink: SIGWINCH + SIGINT.
+//
+// Linux/glibc x86_64 only. The handler + static state live in the C shim
+// (vendor/signal_shim.c) because Blink (v0.40) has no FFI callback /
+// function-pointer surface — sigaction(2) needs `void(*)(int)`.
+//
+// Drain reads bytes from the shim one at a time via wink_signal_read_one,
+// because Blink's Ptr[U8] has no offset arithmetic (see raw.bl header).
+//
+// MANUAL SMOKE TEST (no automated coverage — would require sending real
+// signals to the test runner, which terminates it for SIGINT and is racy
+// for SIGWINCH):
+//   blink run a tiny program that does
+//     `with signal.install() as s {
+//        time.sleep(Duration.seconds(5))
+//        for e in signal.drain(s) { io.println("{e}") }
+//      }`
+//   resize the terminal during the sleep window — expect Resize(cols, rows).
+//   press Ctrl-C at the shell after the program exits — should be normal.
+
+import wink.event.{Event}
+
+// ---- FFI bindings (shim) --------------------------------------------------
+
+@trusted
+@ffi("signal_shim", "wink_signal_install")
+fn c_install() -> I32 ! FFI
+
+@trusted
+@ffi("signal_shim", "wink_signal_uninstall")
+fn c_uninstall() -> I32 ! FFI
+
+@trusted
+@ffi("signal_shim", "wink_signal_read_fd")
+fn c_read_fd() -> I32 ! FFI
+
+@trusted
+@ffi("signal_shim", "wink_signal_read_one")
+fn c_read_one() -> I32 ! FFI
+
+// Packed cols/rows: (cols << 16) | rows. Single ioctl on the C side.
+@trusted
+@ffi("signal_shim", "wink_winsize_get")
+fn c_winsize_get() -> I32 ! FFI
+
+// ---- Public type ----------------------------------------------------------
+
+pub type Signals {
+    read_fd: I32
+}
+
+// ---- Public API -----------------------------------------------------------
+
+pub fn install() -> Signals ! FFI {
+    let _ = c_install()
+    Signals { read_fd: c_read_fd() }
+}
+
+// SIGINT = 2, SIGWINCH = 28 on Linux/x86_64. Hard-coded; the shim is already
+// Linux-pinned per raw.bl's header comment.
+fn sig_int() -> Int { 2 }
+fn sig_winch() -> Int { 28 }
+
+pub fn drain(_s: Signals) -> List[Event] ! FFI {
+    let mut seen_winch = false
+    let mut seen_int   = false
+
+    while true {
+        let b = c_read_one().to_int()
+        if b < 0 { break }
+        match b {
+            x if x == sig_winch() => { seen_winch = true }
+            x if x == sig_int()   => { seen_int   = true }
+            _ => {}
+        }
+    }
+
+    let out: List[Event] = []
+    if seen_winch {
+        let packed = c_winsize_get().to_int()
+        if packed >= 0 {
+            out.push(Event.Resize(
+                cols: packed >> 16.to_u32(),
+                rows: packed & 65535
+            ))
+        }
+    }
+    if seen_int {
+        out.push(Event.Quit)
+    }
+    out
+}
+
+impl Closeable for Signals {
+    fn close(_self) {
+        // Inline FFI: trait method bodies do not propagate ! FFI; mirrors
+        // raw.bl's `impl Closeable for RawMode`.
+        let _ = c_uninstall()
+    }
+}
+
+// ---- Tests ----------------------------------------------------------------
+
+test "install then close round-trips" {
+    let s = install()
+    assert(s.read_fd.to_int() >= 0, "read_fd should be non-negative after install")
+    s.close()
+}
+
+test "drain on idle returns empty" {
+    let s = install()
+    let evs = drain(s)
+    assert_eq(evs.len(), 0)
+    s.close()
+}
+
+test "double install fails" {
+    let s = install()
+    // Second install attempt: the C shim returns -1 when already installed.
+    let rc = c_install().to_int()
+    assert_eq(rc, -1)
+    s.close()
+}
+
+test "read_fd is -1 after uninstall" {
+    let s = install()
+    s.close()
+    assert_eq(c_read_fd().to_int(), -1)
+}

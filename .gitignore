@@ -1,3 +1,4 @@
 build/
 .tmp/
 .blink/
+.claude/settings.local.json
