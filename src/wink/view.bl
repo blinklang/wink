@@ -1,0 +1,97 @@
+// Naive full-redraw renderer for wink.
+//
+// v0.1: takes a List[Str] (each entry is one line, ANSI styling already
+// embedded by the caller) and dumps it to stdout, replacing the previous
+// frame. No cell buffer, no diffing — that's deferred to v0.2. The public
+// API (`render(frame)`) is intentionally stable so a diffed renderer can
+// drop in later without touching call sites.
+//
+// Wire format produced by `frame_to_bytes`:
+//   ESC[H                     ; cursor home
+//   line_1 + ESC[K + \r\n     ; clear-to-end-of-line then CRLF
+//   line_2 + ESC[K + \r\n
+//   ...
+//
+// Why per-line ESC[K instead of an upfront ESC[2J: 2J blanks the whole
+// buffer first, producing a visible flicker. Per-line K overwrites old
+// content as we go and the eye sees a smooth replacement.
+//
+// Why \r\n not \n: raw mode disables ONLCR, so a bare \n won't return the
+// cursor to column 0.
+
+import wink.raw.{write_all}
+
+// ---- Internal helpers -----------------------------------------------------
+
+fn esc_byte() -> Str {
+    str_from_code_point(27)
+}
+
+fn home_seq() -> Str {
+    esc_byte() + "[H"
+}
+
+fn clear_eol_seq() -> Str {
+    esc_byte() + "[K"
+}
+
+// ---- Pure byte-builder (testable without a TTY) ---------------------------
+
+fn frame_to_bytes(frame: List[Str]) -> Str {
+    let mut sb = StringBuilder.new()
+    sb.write(home_seq())
+    let eol = clear_eol_seq()
+    frame.for_each(fn(line: Str) -> Void {
+        sb.write(line)
+        sb.write(eol)
+        sb.write("\r\n")
+    })
+    sb.to_str()
+}
+
+// ---- Public API -----------------------------------------------------------
+
+pub fn render(frame: List[Str]) ! FFI {
+    let bytes = frame_to_bytes(frame)
+    write_all(1.to_i32(), bytes)
+}
+
+// ---- Tests ----------------------------------------------------------------
+
+test "frame_to_bytes empty list emits ESC[H only" {
+    let s = frame_to_bytes([])
+    assert_eq(s, esc_byte() + "[H")
+}
+
+test "frame_to_bytes single line wraps with ESC[K and CRLF" {
+    let s = frame_to_bytes(["hello"])
+    assert_eq(s, esc_byte() + "[H" + "hello" + esc_byte() + "[K" + "\r\n")
+}
+
+test "frame_to_bytes preserves embedded ANSI styling untouched" {
+    let styled = esc_byte() + "[31mred" + esc_byte() + "[0m"
+    let s = frame_to_bytes([styled])
+    // The styling bytes must survive — view.bl does not interpret ANSI.
+    assert(s.contains(styled), "embedded ANSI was mangled")
+}
+
+test "frame_to_bytes preserves order across multiple lines" {
+    let s = frame_to_bytes(["one", "two", "three"])
+    let i_one = s.index_of("one")
+    let i_two = s.index_of("two")
+    let i_three = s.index_of("three")
+    assert(i_one >= 0, "missing 'one'")
+    assert(i_two > i_one, "'two' not after 'one'")
+    assert(i_three > i_two, "'three' not after 'two'")
+    // Every line gets its own ESC[K + CRLF.
+    assert_eq(s.ends_with(esc_byte() + "[K" + "\r\n"), true)
+}
+
+test "frame_to_bytes first byte is always ESC" {
+    let s = frame_to_bytes(["whatever"])
+    let b = Bytes.from_str(s)
+    match b.get(0) {
+        Some(byte) => assert_eq(byte, 27)
+        None => assert(false, "frame_to_bytes returned empty string")
+    }
+}
